@@ -1,0 +1,432 @@
+---
+title: "Simulating a clinical trial dataset with missing values"
+author: Laura Symul & Claude AI
+date: today
+lang: en
+language:
+  en:
+    title-block-author-single: "Author"
+  fr:
+    title-block-author-single: "Auteur"
+date-format: long
+title-block-banner: "#458B74"
+format: 
+  html:
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+engine: knitr
+embed-resources: true
+editor: 
+  markdown: 
+    wrap: 72
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+prefer-html: true
+---
+
+## Overview
+
+This document simulates a clinical trial dataset with missing values.
+
+The dataset contains participant-level information, including study design data (study site, randomization arm), some demographic and anthropometric variables (sex, age, height, weight), lifestyle factors (physical activity), and the clinical outcome (cure).
+
+Specifically, it creates the two datasets used in the `mice` demo (`04_mice_demo.qmd`):
+
+1. **`data_complete`**: a synthetic randomised trial with no missing values, including the participants' BMI (`bmi`).
+2. **`data_missing`**: a copy of `data_complete` with `bmi` removed and missing values introduced under a **missing at random (MAR)** mechanism.
+
+Both datasets are saved as `.RData` files.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(gt)
+library(glue)
+theme_set(theme_light())
+
+n <- 200 # number of participants
+set.seed(999)
+```
+
+## Part 1: The complete dataset
+
+### Data-generating process
+
+```{r}
+sim_pars <-
+  list(
+    study_sites = c("A", "B", "C"),
+    sex = c("F", "M"),
+    age_range = c(18, 80),
+    ht_mean = c(F = 166, M = 180),
+    ht_sd = 7,
+    ht_decline_age = 60,
+    ht_decline_per_year = 0.1,
+    physical_activity_levels = c("low", "med", "high"),
+    physical_activity_probs = c(0.35, 0.40, 0.25),
+    physical_activity_probs_site_A = c(0.15, 0.35, 0.50),
+    physical_activity_probs_site_C = c(0.6, 0.25, 0.15),
+    bmi_median = c(low = 30, med = 24, high = 18),
+    bmi_sd_log = 0.05
+  )
+```
+
+
+We simulate the variables one after the other, so that each one can depend on the ones simulated before it.
+
+```{r}
+
+sim_tbl <- tribble(
+  ~Variable             , ~`Simulation specifications`                                                                                                                                                                                                                                       ,
+  "`study_site`"        , glue('{toString(sim_pars$study_sites)} with equal probability')                                                                                                                                                                                                    ,
+  "`arm`"               , '1:1 randomisation to `"placebo"` or `"treatment"`'                                                                                                                                                                                                                ,
+  "`sex`"               , '`"F"` or `"M"` with probability 0.5 each'                                                                                                                                                                                                                         ,
+  "`age`"               , glue("Uniform between {sim_pars$age_range[1]} and {sim_pars$age_range[2]} years (whole years)")                                                                                                                                                                    ,
+  "`ht`"                , glue("Normal, mean {sim_pars$ht_mean['M']} cm (M) or {sim_pars$ht_mean['F']} cm (F), ", "SD {sim_pars$ht_sd} cm, with a {sim_pars$ht_decline_per_year} cm/year decline ", "after age {sim_pars$ht_decline_age}")                                                   ,
+  "`physical_activity`" , glue('`"low"`, `"med"`, `"high"` with probabilities ', '{toString(sim_pars$physical_activity_probs_site_A)} at site `"A"`, ', '{toString(sim_pars$physical_activity_probs_site_C)} at site `"C"`, ', 'and {toString(sim_pars$physical_activity_probs)} otherwise') ,
+  "`bmi`"               , glue("Log-normal distribution depending on physical activity level, with median ", "{sim_pars$bmi_median['low']} (low), {sim_pars$bmi_median['med']} (med) or ", "{sim_pars$bmi_median['high']} (high) kg/m², and SD {sim_pars$bmi_sd_log} on the log scale")      ,
+  "`wt`"                , "bmi × (ht / 100)², in kg"                                                                                                                                                                                                                                         ,
+  "`cure`"              , "Bernoulli, with the probability given by the logistic model below"
+)
+
+
+sim_tbl |>
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_align(align = "left", columns = everything()) |>
+  tab_style(
+    style = cell_borders(sides = "bottom", weight = px(1), color = "black"),
+    locations = cells_body(rows = c(2, 8))
+  )
+```
+
+The probability of cure follows a logistic model:
+
+$$
+\text{logit}\,  P(\text{cure} = 1) = \beta_0 + \beta_\text{trt}\, \text{trt} + \beta_\text{wt}\, (\text{wt} - 80)\, \text{trt} - \beta_{\text{age}} \, (\text{age} - 50)
+$$
+
+where "trt" is 1 for participants in the treatment arm. 
+
+```{r}
+#| label: true-parameters
+beta_0 <- qlogis(0.30) # placebo, BMI = 26
+beta_trt <- log(2.5) # treatment effect
+beta_wt <- log(0.95) # per weight unit
+beta_age <- 0.1 # per year of age
+```
+
+
+
+### Simulation
+
+```{r}
+#| label: simulate
+data_complete <-
+  tibble(id = sprintf("P%03d", 1:n)) |>
+  mutate(
+    study_site = sample(sim_pars$study_sites, n, replace = TRUE) |> factor(),
+    sex = sample(sim_pars$sex, n, replace = TRUE) |>
+      factor(levels = sim_pars$sex),
+    age = round(runif(
+      n,
+      min = sim_pars$age_range[1],
+      max = sim_pars$age_range[2]
+    )),
+    ht = rnorm(
+      n,
+      mean = if_else(sex == "M", sim_pars$ht_mean["M"], sim_pars$ht_mean["F"]) -
+        sim_pars$ht_decline_per_year * pmax(age - sim_pars$ht_decline_age, 0),
+      sd = 7
+    ),
+    physical_activity = {
+      pa <- character(n)
+      site_a <- study_site == "A"
+      site_c <- study_site == "C"
+      pa[site_a] <- sample(
+        sim_pars$physical_activity_levels,
+        sum(site_a),
+        replace = TRUE,
+        prob = sim_pars$physical_activity_probs_site_A
+      )
+      pa[site_c] <- sample(
+        sim_pars$physical_activity_levels,
+        sum(site_c),
+        replace = TRUE,
+        prob = sim_pars$physical_activity_probs_site_C
+      )
+      pa[!(site_a | site_c)] <- sample(
+        sim_pars$physical_activity_levels,
+        sum(!(site_a | site_c)),
+        replace = TRUE,
+        prob = sim_pars$physical_activity_probs
+      )
+      factor(pa, levels = sim_pars$physical_activity_levels)
+    },
+    bmi = exp(rnorm(
+      n,
+      mean = log(case_match(
+        physical_activity,
+        "low" ~ sim_pars$bmi_median["low"],
+        "med" ~ sim_pars$bmi_median["med"],
+        "high" ~ sim_pars$bmi_median["high"]
+      )),
+      sd = sim_pars$bmi_sd_log
+    )),
+    wt = bmi * (ht / 100)^2,
+    arm = sample(rep(c("placebo", "treatment"), length.out = n)) |>
+      factor(levels = c("placebo", "treatment")),
+    p_cure = plogis(
+      beta_0 +
+        beta_trt * (arm == "treatment") +
+        beta_wt * (wt - 80) * (arm == "treatment") -
+        0.1 * (age - 50)
+    ),
+    cure = rbinom(n, size = 1, prob = p_cure)
+  ) |>
+  mutate(across(c(ht, wt, bmi), \(x) round(x, 1))) |>
+  select(id, study_site, sex, age, ht, wt, bmi, physical_activity, arm, cure)
+
+data_complete
+```
+
+### Summary and visualization of simulated data
+
+```{r}
+#| label: summary-numeric
+data_complete |>
+  group_by(sex) |>
+  summarise(
+    n = n(),
+    across(c(age, ht, wt, bmi), \(x) round(mean(x), 1), .names = "mean_{.col}")
+  ) |>
+  gt()
+```
+
+```{r}
+#| label: fig-activity-by-site
+#| fig-cap: "Physical activity by study site."
+data_complete |>
+  ggplot(aes(x = study_site, fill = physical_activity)) +
+  geom_bar(position = "fill") +
+  labs(x = "Study site", y = "Proportion of physical activity levels")
+```
+
+```{r}
+#| label: fig-bmi-activity
+#| fig-cap: "BMI by study site."
+data_complete |>
+  ggplot(aes(x = study_site, y = bmi, col = study_site)) +
+  geom_boxplot(outlier.shape = NA, varwidth = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.4) +
+  labs(x = "Study site", y = "BMI (kg/m2)")
+```
+
+```{r}
+#| label: fig-wt-by-site
+#| fig-cap: "Weight by study site."
+data_complete |>
+  ggplot(aes(x = study_site, y = wt, col = study_site)) +
+  geom_boxplot(outlier.shape = NA, varwidth = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.4) +
+  labs(x = "Study site", y = "Weight (kg)")
+```
+
+```{r}
+#| label: fig-wt-vs-ht
+#| fig-cap: "Weight versus height by study site."
+data_complete |>
+  ggplot(aes(x = ht, y = wt, col = study_site)) +
+  geom_point(width = 0.15, alpha = 0.4) +
+  geom_smooth(method = "lm") +
+  labs(x = "Height (cm)", y = "Weight (kg)")
+```
+
+
+```{r}
+#| label: fig-ht-by-site
+#| fig-cap: "Height by study site."
+data_complete |>
+  ggplot(aes(x = study_site, y = ht, col = study_site)) +
+  geom_boxplot(outlier.shape = NA, varwidth = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.4) +
+  labs(x = "Study site", y = "Height (cm)")
+```
+
+```{r}
+#| label: cure-rates
+data_complete |>
+  group_by(arm, sex) |>
+  summarise(n = n(), cure_rate = mean(cure), .groups = "drop") |>
+  gt()
+```
+
+```{r}
+data_complete |>
+  ggplot() +
+  aes(x = wt, y = cure, col = arm) +
+  geom_point() +
+  geom_smooth(
+    method = "glm",
+    method.args = list(family = "binomial")
+  )
+```
+
+
+## Part 2: The dataset with missing values
+
+### Missingness mechanism
+
+We remove `bmi` (it is typically a "calculated variable" and not a raw measurement) and introduce missing values as follows:
+
+-   **Study site**: at sites A and B, the baseline probability that `age`, `ht`, `wt` or `physical_activity` is missing is 10%. At site C it is 30%.
+-   **wt**: is more likely to be missing than the other variables and probability also depends on the study site
+-   Study design and outcome variables (`id`, `study_site`, `arm` and `cure`) are never missing.
+
+Because missingness depends only on the study site (which is always observed), the data are **missing at random (MAR)**.
+
+```{r}
+#| label: missingness-parameters
+p_miss_site <- c(A = 0.10, B = 0.10, C = 0.30)
+p_miss_wt <- c(A = 0.1, B = 0.1, C = 0.9)
+```
+
+```{r}
+#| label: introduce-missingness
+# Draw one missingness indicator per participant and variable
+add_missing <- function(x, p) if_else(runif(length(x)) < p, NA, x)
+
+data_missing <-
+  data_complete |>
+  select(-bmi) |>
+  mutate(
+    # Probability of missingness based on study site and variable-specific effect for wt
+    p_miss = p_miss_site[as.character(study_site)],
+    across(c(age, ht, physical_activity), \(x) add_missing(x, p_miss)),
+    wt = add_missing(wt, p_miss_wt[as.character(study_site)]),
+  ) |>
+  select(-p_miss)
+
+
+data_missing |>
+  head(10) |>
+  gt(caption = "First 10 rows of the dataset with missing values") |>
+  # highlight missing values by coloring them
+  tab_style(
+    style = cell_fill(color = "lightpink"),
+    locations = map(
+      colnames(data_missing),
+      \(col) cells_body(columns = all_of(col), rows = is.na(.data[[col]]))
+    )
+  )
+```
+
+### Checks
+
+Proportion of missing values per variable:
+
+```{r}
+#| label: missing-per-variable
+data_missing |>
+  summarise(across(everything(), \(x) mean(is.na(x)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "prop_missing")
+```
+
+Proportion of missing values per variable and study site:
+
+```{r}
+#| label: fig-missing-by-site
+#| fig-cap: "Proportion of missing values by study site."
+data_missing |>
+  pivot_longer(
+    c(sex, age, ht, wt, physical_activity),
+    names_to = "variable",
+    values_transform = as.character
+  ) |>
+  group_by(study_site, variable) |>
+  summarise(prop_missing = mean(is.na(value)), .groups = "drop") |>
+  ggplot(aes(x = variable, y = prop_missing, fill = study_site)) +
+  geom_col(position = "dodge") +
+  labs(x = NULL, y = "Proportion missing", fill = "Study site")
+```
+
+Number of missing values per participant:
+
+```{r}
+#| label: fig-missing-per-participant
+#| fig-cap: "Number of missing values per participant."
+data_missing |>
+  mutate(n_missing = rowSums(is.na(pick(everything())))) |>
+  count(n_missing) |>
+  ggplot(aes(x = n_missing, y = n)) +
+  geom_col() +
+  labs(x = "Number of missing values", y = "Number of participants")
+```
+
+```{r}
+#| label: fig-wt-vs-cure
+#| fig-cap: "Scatter plots of weight vs cure for complete and missing data."
+library(patchwork)
+data_complete |>
+  filter(arm == "treatment") |>
+  ggplot() +
+  aes(x = wt, y = cure) +
+  geom_point(alpha = 0.5, aes(col = study_site)) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  xlim(range(data_complete$wt) + c(-1, 1)) +
+
+  data_missing |>
+    filter(arm == "treatment") |>
+    ggplot() +
+  aes(x = wt, y = cure) +
+  geom_point(alpha = 0.5, aes(col = study_site)) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  xlim(range(data_complete$wt) + c(-1, 1)) +
+
+  plot_layout(ncol = 1)
+```
+
+```{r}
+#| label: fig-wt-vs-cure-overlay
+#| fig-cap: "Scatter plot of weight vs cure for complete and missing data (in green)."
+data_complete |>
+  filter(arm == "treatment") |>
+  ggplot() +
+  aes(x = wt, y = cure) +
+  geom_point(alpha = 0.5, aes(col = study_site)) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  geom_smooth(
+    data = data_missing |> filter(arm == "treatment"),
+    method = "glm",
+    method.args = list(family = "binomial"),
+    col = "green",
+    fill = "green"
+  ) +
+  xlim(range(data_complete$wt) + c(-1, 1))
+```
+
+
+
+
+## Export & Session info
+
+```{r}
+#| label: export
+save(data_complete, file = "simulated_data/data_complete.RData")
+save(data_missing, file = "simulated_data/data_missing.RData")
+```
+
+The files `data_complete.RData` and `data_missing.RData` are saved in the `simulated_data/` directory.
+
+
+::: {.callout collapse="true"}
+## Session Info
+```{r}
+#| label: session-info
+sessionInfo()
+```
+:::

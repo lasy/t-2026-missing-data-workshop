@@ -1,0 +1,374 @@
+\documentclass{beamer}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%             
+
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage{amsmath}
+
+\graphicspath{ {./images/} }
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\title{Multiple imputation: brief summary}
+%\subtitle{with Stata and R}
+\author{Aur\'elie Bertrand \& Laura Symul}
+\date{Applied Statistics Workshop, Nov 2026}
+\institute{SMCS, ISBA} 
+\begin{document}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{frame}[plain]
+ \titlepage
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Multiple imputation (MI)}
+
+
+\begin{frame}
+\frametitle{A 3-step method}
+
+Each missing cell is \textcolor{cyan}{replaced by more than one value}. %, the analysis is performed on each imputed dataset and the results are then \textcolor{cyan}{pooled} over all these datasets.
+
+\vspace{0.3cm}
+
+		\begin{enumerate}
+			\item \textcolor{cyan}{Imputation} step 
+				\begin{itemize}
+					\item Create $m>1$ imputed (and, hence, complete) datasets by replacing, for each variable, all missing values by plausible values from a specifically designed distribution.
+				\end{itemize}
+			\item \textcolor{cyan}{Analysis} (or estimation) step
+				\begin{itemize}
+					\item Apply the traditional (complete-data) analysis (\textit{e.g.}, linear regression) on each imputed dataset.
+				\end{itemize}
+			\item \textcolor{cyan}{Pooling} step
+				\begin{itemize}
+					\item Results from the different data sets are pooled to obtain the final estimates. 
+				\end{itemize}
+		\end{enumerate}
+\end{frame}
+
+\begin{frame}
+\frametitle{Advantages}
+
+	\begin{itemize}
+	\item Requires \textcolor{cyan}{MAR}.% (or MCAR).	
+	\item Takes into account the \textcolor{cyan}{uncertainty in the imputed values}.
+			\begin{itemize}
+				\item Contrary to single imputation.
+			\end{itemize}
+	\item Incorporates \textcolor{cyan}{auxiliary information} (in the imputation step).
+
+	\item With plausible imputation model, produces \textcolor{cyan}{unbiased parameter and standard error} estimators. 
+		\begin{itemize}
+			\item Quite \textcolor{cyan}{robust} to departures from the correct specification of the imputation model if the rates of missing information are low and the correct model of interet is used in the analysis.
+		\end{itemize}			
+	\item Allows for \textcolor{cyan}{varying uncertainty levels} between imputed variables.
+	\item The missing value problem is dealt with \textcolor{cyan}{before the analysis} of interest is performed.
+	\item Can be used with many types of analyses.
+\end{itemize}
+	
+	
+\end{frame}
+
+
+\begin{frame}
+\frametitle{MI in practice}
+In `R`
+\begin{itemize}
+	\item In general, performed using three separate steps:
+		\begin{itemize}
+			\item Generate the imputed datasets (using, for example, the \texttt{mice} function of package \texttt{mice} or the \texttt{amelia} function of package \texttt{Amelia}).
+			\item Analyze them (using, for example, the \texttt{with} function of the \texttt{mice} package).
+			\item Pool the results (using, for example, the \texttt{pool} function of the \texttt{mice} package).
+		\end{itemize}
+\end{itemize}
+
+Many alternative implementations exist for different software/language.
+
+\end{frame}
+
+
+\subsection{Imputation step}
+
+\begin{frame}
+\frametitle{Imputation step -- Main parameters}
+\begin{itemize}
+	\item \textcolor{cyan}{Number of imputations}, $m$:
+		\begin{itemize}
+			\item (rule of thumb) set $m$ to the average (over all variables) percentage of missing data.
+			\item Recommended to use at least 20 imputations to reduce sampling error.
+		\end{itemize}
+	\item Choice of the \textcolor{cyan}{imputation method}.
+		\begin{itemize}
+			\item If only 1 variable with missing values: choose a \textcolor{cyan}{univariate} imputation method and its \textcolor{cyan}{predictors}. 
+			\item If missing values in more than one variable: choose between
+				\begin{itemize}
+					\item an approach which imputes \textcolor{cyan}{all variables at the same time}.
+					\item an approach that imputes the variables \textcolor{cyan}{one by one} (iteratively): for each variable, a univariate imputation method must be chosen.
+				\end{itemize}
+	
+		\end{itemize}
+\end{itemize}
+\vfill
+\footnotesize{\url{https://stefvanbuuren.name/fimd/sec-howmany.html}}
+\end{frame}
+
+
+\subsubsection{Univariate methods}
+
+
+\begin{frame}
+\frametitle{Univariate imputation methods}
+A \textcolor{cyan}{statistical model} allowing one to \textcolor{cyan}{predict the variable with missing values} based on other variables from the data.\\ \vspace{0.3cm}
+
+In multiple imputation, it is therefore important to distinguish between:
+
+\begin{itemize}
+	\item the \textcolor{cyan}{response model}: the model of interest.
+	\item the \textcolor{cyan}{imputation model}: the model used to impute the incomplete variable.
+\end{itemize}
+
+
+\end{frame}
+
+
+
+\begin{frame}
+\frametitle{Choice of a univariate imputation method}
+
+Choice based on the \textcolor{cyan}{type of the variable} to impute:
+\begin{itemize}
+	\item Continuous variable:
+		\begin{itemize}
+			\item \textcolor{cyan}{Bayesian multiple imputation}
+			\item \textcolor{cyan}{Bootstrap multiple imputation}
+			\item \textcolor{cyan}{Predictive mean matching} (PMM): less sensitive to model misspecification (\textit{e.g.}, nonnormality) than Bayesian and Bootstrap multiple imputation.
+	\end{itemize}
+	\item Discrete or categorical variable:
+		\begin{itemize}
+			\item Multiple imputation based on binary, multinomial or ordered \textcolor{cyan}{logistic regression}.
+			\item \textcolor{cyan}{Predictive mean matching} (PMM)
+		\end{itemize}
+	\item Count variables, semi-continuous variables, censored variables, truncated variables, rounded variables: some methods exist too.
+\end{itemize}
+
+\emph{An in-depth comparison of these methods (useful for making an informed choice) is beyond the scope of this workshop.}
+
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Predictive Mean Matching (PMM)}		
+
+	\begin{itemize}
+		\item Alternative to Bayesian and Bootstrap multiple imputation.
+		\item Preserves the original distribution $\Rightarrow$ \textcolor{cyan}{less sensitive to model misspecification} (\textit{e.g.}, nonnormality) than Bayesian and Bootstrap multiple imputation.
+
+		\item Quite robust to transformations of the incomplete variable (generally yields similar results, whatever the transformation).
+		\item Suited to \textcolor{cyan}{discrete data}.
+	
+	\end{itemize}
+	\vfill
+{\footnotesize Jia and Wu (2023), \url{https://stefvanbuuren.name/fimd/sec-pmm.html}}
+\end{frame}
+
+\begin{frame}[label=main3]
+\frametitle{Predictive Mean Matching (PMM) (cont.)}		
+
+Steps:
+	\begin{itemize}
+		\item For each variable containing missing values: 
+			\begin{itemize}
+				\item Estimate the parameters of a \textcolor{cyan}{predictive model}.
+				\item For each (missing or observed) value, \textcolor{cyan}{obtain a prediction} from this estimated predictive model.
+				\item Then, for each missing value:
+					\begin{itemize}
+						\item Identify a set of \textcolor{cyan}{candidate donors}, i.e., a set of observed values whose predicted value is close to the predicted value of the missing value. 
+						\item Randomly \textcolor{cyan}{select one donor} among the candidate donors, and use its observed value as \textcolor{cyan}{imputed value}.
+					\end{itemize}
+			\end{itemize}
+	\end{itemize}
+	In R, \texttt{mice} function with the \texttt{pmm} method. By default, a linear model with main effects of all other variables.
+
+
+%\hyperlink{supplemental3}{\beamerbutton{More details}}\\
+
+\vfill
+\footnotesize{Jia and Wu (2023), \url{https://stefvanbuuren.name/fimd/sec-pmm.html}}
+
+
+\end{frame}
+
+
+\begin{frame}
+%\frametitle{Imputation methods for univariate missing data}
+\frametitle{Univariate imputation methods in common software}
+In R: many methods available, among which:
+\begin{itemize}
+	\item Bayesian multiple imputation: in \texttt{mice}, method \texttt{norm} (or, equivalently, \texttt{mice.impute.norm}).
+	\item Bootstrap multiple imputation: in \texttt{mice}, method \texttt{norm.boot}.
+	\item Predictive mean matching: in \texttt{mice}, method \texttt{pmm} (default method for continuous data).
+	\item Logistic regressions: methods \texttt{logreg} (for binary variables), \texttt{polyreg} (for unordered variables) and \texttt{polr} (for ordered variables).
+\end{itemize}
+
+\end{frame}
+
+
+
+\subsection{Predictor variables in the imputation model}
+
+\begin{frame}
+\frametitle{Predictor variables in the imputation model}
+
+The imputation model should contain:
+\begin{itemize}
+\setlength\itemsep{0.3cm}
+	\item All variables involved in the definition of the \textcolor{cyan}{model of interest} and the \textcolor{cyan}{sampling design}:
+		\begin{itemize}
+			\item All variables that are \textcolor{cyan}{explanatory variables} in the model of interest (including interactions).
+			\item The \textcolor{cyan}{response variable} of the model of interest.	
+			\item In a survey context: sampling weights, (main) strata and (main) cluster identifiers.
+		\end{itemize}
+		 \emph{Congeniality} principle: all variables of the analysis model should also appear (in the same form) in the imputation model.
+	\item \textcolor{cyan}{Auxiliary variables}:
+		\begin{itemize}
+			\item All variables that are related to missingness.
+			\item All variables that are related to the variable with missing values.
+		\end{itemize}
+
+\end{itemize}
+
+\vfill
+\footnotesize{Mainzer et al. (2021), Stata (2023a)}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Choice of predictor variables in the imputation model}
+\begin{itemize}
+\setlength\itemsep{0.3cm}
+	\item If max 20-30 variables: include all of them.
+	\item If more variables: select 15-20 variables:
+		\begin{itemize}
+			\item All the variables of the \textcolor{cyan}{analysis model} (including the outcome and interactions).
+			\item \textcolor{cyan}{Auxiliary} variables (related to nonresponse and to the variable to be imputed).
+			\item \textcolor{cyan}{Omit variables having too many missing values} in the subgroup of observations where the variable to be imputed is missing.
+		\end{itemize}
+	\item There exist \textcolor{cyan}{indices} that can be computed based on the data and that can help selecting predictor variables (\emph{beyond the scope of this introductory training}).
+\end{itemize}
+\vfill
+\footnotesize{\url{https://stefvanbuuren.name/fimd/sec-modelform.html}}
+
+\end{frame}
+
+
+\subsection{Pooling phase}
+
+
+
+\begin{frame}
+\frametitle{MI: pooling phase for parameter estimates}
+Combine estimated parameters and their SEs using rules that allow overall inference (Rubin, 1987), known as \textcolor{cyan}{Rubin's rules}.
+\begin{itemize}
+\setlength\itemsep{0.3cm}
+	\item Final estimation of a \textcolor{cyan}{parameter}: 
+		\begin{itemize}
+			\item average (over the imputed datasets) of all estimated values.
+		\end{itemize}
+	\item Final estimation of a parameter \textcolor{cyan}{standard error}: 
+		\begin{itemize}
+			\item NOT the average of all standard errors!
+			\item Average of two sources of variability:
+		
+			\begin{itemize}
+				\item Average of \textcolor{cyan}{within-imputation variance}: average (over the imputed datasets) of variances in the estimation of a parameter in a sample (related to its SE).
+				\item \textcolor{cyan}{Between-imputation variance}: variability (between imputed datasets) in the estimations of the parameter.
+			\end{itemize}
+		\end{itemize}
+\end{itemize}
+\vfill
+\footnotesize{\url{https://stefvanbuuren.name/fimd/sec-multiparameter.html}}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{MI: pooling phase for tests}
+
+Confidence intervals and p-values of a test about a \textcolor{cyan}{single parameter}:
+\begin{itemize}
+	\item NOT the average of all confidence interval bounds or p-values!
+	\item Computed based on pooled estimation of the parameter and its standard error (as seen on previous slide).
+\end{itemize}	
+
+\vspace{1cm}
+
+For \textcolor{cyan}{multiparameter} tests, \textit{e.g.} test of several coefficients, test of model fit, test of comparison of fit of two models:  
+\begin{itemize}
+	\item 3 possible types of test statistics.
+\end{itemize}	
+\vfill
+\footnotesize{\url{https://stefvanbuuren.name/fimd/sec-multiparameter.html}}
+\end{frame}
+
+
+
+\subsection{Miscellaneous}
+
+
+
+\begin{frame}
+\frametitle{MI in practice}
+
+\begin{enumerate}
+	\item Decide whether MAR is plausible
+	\item Choose the form of the structural part of the imputation model and the error distribution.
+	\item Select variables to include in the imputation model. %General advice: as many variables (and their interactions!) as possible.
+	\item Decide whether to impute variables that are functions of other variables.
+	\item Choose order in which the incomplete variables will be imputed (can influence algorithm convergence) 
+		\begin{itemize}
+			\item When the missing data pattern is close to monotone: convergence may be quicker if visiting the columns in increasing order of the number of missing data.
+		\end{itemize}
+	\item Decide setup of the starting imputations and the number of iterations.  
+	\item Select the number of imputed datasets.
+\end{enumerate}
+\vfill
+\footnotesize{\url{https://stefvanbuuren.name/fimd/sec-choices.html}}
+\end{frame}
+
+
+
+
+
+
+\begin{frame}
+\frametitle{Reporting}
+
+Guidelines from \footnotesize{\url{https://stefvanbuuren.name/fimd/sec-reporting.html}} (more details and a template of paragraph on the website):
+\begin{itemize}
+	\item Amount of missing data
+	\item Reasons for missingness
+	\item Consequences
+	\item Method
+	\item Software
+	\item Number of imputed datasets
+	\item Imputation model
+	\item Derived variables
+	\item Diagnostics
+	\item Pooling
+	\item Complete-case analysis
+	\item Sensitivity analysis
+\end{itemize}
+
+\end{frame}
+
+
+\end{document}
+
+

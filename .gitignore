@@ -1,0 +1,17 @@
+.DS_Store
+99_purgatory.qmd
+05_multiple_imputation copy.tex
+05_multiple_imputation.aux
+05_multiple_imputation.fdb_latexmk
+05_multiple_imputation.fls
+*.log
+*.nav
+*.out
+*.snm
+*.gz
+*.toc
+test.aux
+test.fdb_latexmk
+test.fls
+test.pdf
+test.tex

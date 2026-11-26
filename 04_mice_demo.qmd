@@ -1,0 +1,1123 @@
+---
+title: "Multiple imputation with `mice`"
+author: Laura Symul, Aurélie Bertrand, and Claude AI
+institute: Université catholique de Louvain
+date: today
+lang: en
+language:
+  en:
+    title-block-author-single: "Author"
+  fr:
+    title-block-author-single: "Auteur"
+date-format: long
+title-block-banner: "#458B74"
+format: 
+  html:
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+engine: knitr
+embed-resources: true
+editor: 
+  markdown: 
+    wrap: 72
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+prefer-html: true
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(mice)
+library(broom)
+library(visdat)
+library(gt)
+library(patchwork)
+library(magrittr)
+library(gtsummary)
+
+theme_set(theme_light())
+```
+
+
+
+
+## Introduction and workshop objectives
+
+:::callout-note
+## Workshop objectives (Part 2)
+The objectives of this part of the workshop are to:
+
+- Illustrate the impact of missing data on statistical analyses with an example on simulated data.
+- Explore different strategies for handling missing data, including complete-case analysis, mean imputation, and multiple imputation by chained equations.
+- Compare the results obtained from these different approaches to assess their implications on the research question.
+:::
+
+### Example: Does a treatment effect depend on participant weight?
+
+Let's consider a scenario where a clinical trial was conducted to evaluate the efficacy of a treatment in curing a disease. 
+
+The treatment was found to be very effective in achieving a cure among participants who received it.
+
+![](images/illu%20trial.png)
+
+
+Now, we are interested in **whether the effect of this treatment** on the probability of cure **depends on the participant's weight** (which is proportional to the volume of blood in the participant's body).
+
+Our research question is:
+
+> Among participants who received the treatment, does the probability of cure differ by weight?
+
+This is a realistic, potentially important research question as treatment efficacy may vary with weight, and dose adjustments may be required based on a participant's weight.
+
+This can be addressed with different models. Here, we choose a simple logistic regression approach, which we fit to the treated participants only:
+
+$$
+\text{logit}\, P(\text{cure} = 1) = \beta_0 + \beta_{wt}\, \text{wt} 
+$$
+
+The estimand of interest is the odds ratio for weight, $\exp(\beta_{wt})$, the odds of cure for a one-unit increase in weight.
+
+```{r}
+formula <- cure ~ wt
+```
+
+
+
+### Data
+
+The trial data was **simulated** to mimic a clinical trial setting, with participant characteristics, treatment assignment, and outcomes generated according to predefined distributions (see `03_simulate_data_for_mice.qmd`).
+
+The advantage of simulating the data is that we first simulated the complete data without any missing values, and then introduced missingness according to a predefined mechanism. 
+
+This allows us to compare the performance of different methods for handling missing data against the known truth.
+
+
+```{r}
+#| label: data
+
+load("simulated_data/data_complete.RData", verbose = TRUE) # creates `data_complete`
+load("simulated_data/data_missing.RData", verbose = TRUE) # creates `data_missing`
+```
+
+```{r}
+#| label: dim-data
+dim(data_complete)
+dim(data_missing)
+
+glimpse(data_complete)
+glimpse(data_missing)
+```
+
+
+### Outline
+
+To illustrate the impact of missing data and of different imputation strategies, we will fit this model **four** times and compare the results.
+Specifically, we will fit the model on:
+
+1. [reference results] the **complete data** (not available in real life, of course), the reference we would get if nothing were missing;
+2. on the set of **complete cases** of the dataset with missing values, the default behaviour of `glm()`;
+3. on the dataset with missing values after **imputation to the mean**;
+4. on the dataset with missing values after **multiple imputation** by chained equation as implemented in the package `mice`.
+
+
+## Exploratory analyses
+
+Before fitting any models, it is important to understand the structure of the data and the patterns of missing data.
+
+### Missing values
+
+#### Frequency and proportion of missing data per variables and study participants
+
+```{r}
+#| label: missing-per-variable
+data_missing |>
+  summarise(across(everything(), \(x) sum(is.na(x)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") |>
+  mutate(prop_missing = n_missing / nrow(data_missing)) |>
+  gt() |>
+  cols_label(
+    n_missing = "Number of missing values",
+    prop_missing = "Proportion of missing values"
+  ) |>
+  fmt_percent(columns = c(prop_missing), decimals = 1)
+```
+
+```{r}
+#| label: complete-cases
+data_missing |>
+  summarise(
+    n_participants = n(),
+    n_complete_cases = sum(complete.cases(pick(everything()))),
+    prop_complete_cases = mean(complete.cases(pick(everything())))
+  ) |>
+  gt() |>
+  fmt_percent(columns = c(prop_complete_cases), decimals = 1) |>
+  cols_label(
+    n_participants = "Number of participants",
+    n_complete_cases = "Number of complete cases",
+    prop_complete_cases = "Proportion of complete cases"
+  )
+```
+
+Each variable has a modest proportion of missing values, but together they leave only about half of the participants with complete data.
+
+#### Missing-data patterns
+
+`md.pattern()` shows each combination of observed (blue) and missing (red) variables. The number of participants with each pattern is on the left, and the number of missing variables in each pattern is on the right.
+
+```{r}
+#| label: fig-md-pattern
+#| fig-cap: "Missing-data patterns."
+#| fig-height: 7
+md_pat <- md.pattern(data_missing, rotate.names = TRUE)
+```
+
+```{r}
+#| label: fig-vis-miss
+#| fig-cap: "Visualization of missing data."
+#| fig-height: 7
+#| fig-width: 7
+visdat::vis_miss(data_missing)
+```
+
+
+#### Factors explaining missingness?
+
+In practice, it may be difficult to identify these factors.
+
+We can explore the data in different ways to see if missingness is related to observed variables.
+
+For example, we can order the data by study site or sex and then visualize the missingness pattern.
+
+```{r}
+#| label: fig-vis-miss-by-site
+#| fig-cap: "Visualization of missing data by study site."
+#| fig-height: 7
+#| fig-width: 7
+data_missing |>
+  visdat::vis_miss(facet = study_site)
+```
+
+```{r}
+#| label: fig-vis-miss-by-sex
+#| fig-cap: "Visualization of missing data by sex."
+#| fig-height: 7
+#| fig-width: 7
+data_missing |>
+  visdat::vis_miss(facet = sex)
+```
+
+From these visualizations, it appears that missingness may be more common at study site C:
+
+```{r}
+#| label: fig-missing-by-site
+#| fig-cap: "Proportion of missing values by study site."
+data_missing |>
+  pivot_longer(
+    c(sex, age, ht, wt, physical_activity),
+    names_to = "variable",
+    values_transform = as.character
+  ) |>
+  group_by(study_site, variable) |>
+  summarise(prop_missing = mean(is.na(value)), .groups = "drop") |>
+  ggplot(aes(x = variable, y = prop_missing, fill = study_site)) +
+  geom_col(position = "dodge") +
+  labs(x = NULL, y = "Proportion missing", fill = "Study site")
+```
+
+
+#### Exploring whether it may be possible to impute missing weight values
+
+We can start by looking at the relationship between `wt`, `ht` and `physical_activity` in the observed data (i.e., in rows where these variables are not missing) since it is plausible that weight depends on both height and physical activity level.
+
+```{r}
+#| label: fig-ht-wt-physical-activity
+#| fig-cap: "Height vs weight by physical activity level in the observed data."
+#| fig-height: 7
+#| fig-width: 7
+data_missing |>
+  drop_na(wt, ht, physical_activity) |>
+  ggplot(aes(x = ht, y = wt, color = physical_activity)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE)
+```
+
+
+This plot suggests that there may be a linear relationship between height and weight, and that weight also varies with physical activity level. This indicates that it may be reasonable to impute missing weight values based on the observed height and physical activity and therefore improve our estimates of the effect of weight on the outcome of interest compared to a complete-case analysis or a simple mean imputation.
+
+
+#### Sanity check: was the treatment effective?
+
+```{r}
+data_missing |>
+  select(arm, cure) |>
+  tbl_summary(by = arm) |>
+  add_p()
+```
+
+
+## Reference: model fitted on the complete data
+
+In a real study we would, of course, never have access to this complete dataset.
+
+Let's see what the complete data tells us.
+
+
+```{r}
+#| label: fit-complete
+#| code-fold: show
+
+data_treated_complete <-
+  data_complete |>
+  filter(arm == "treatment")
+
+fit_complete <-
+  glm(
+    formula,
+    family = binomial,
+    data = data_treated_complete
+  )
+
+fit_complete |> summary()
+```
+
+```{r}
+#| label: fig-complete-data
+#| fig-cap: "Weight vs cure in the complete data for treated participants."
+#| fig-height: 3
+#| fig-width: 6
+
+g_complete_data <-
+  ggplot(data_treated_complete, aes(x = wt, y = cure)) +
+  # geom_point(alpha = 0.5) +
+  geom_jitter(width = 0, height = 0.05, alpha = 0.3) +
+  geom_smooth(
+    method = "glm",
+    method.args = list(family = "binomial")
+  ) +
+  xlim(range(data_treated_complete$wt) + c(-1, 1)) +
+  scale_y_continuous(breaks = c(0, 1), minor_breaks = NULL)
+g_complete_data
+```
+
+## Complete-case analysis
+
+By default, `glm()` silently drops every row with a missing value in any of the variables in the model.
+
+Here we only lose the treated participants with missing `wt`. Values of `age`, `ht` or `physical_activity` are not used by this model, so their missingness does not affect the complete-case analysis.
+
+```{r}
+#| label: fit-cc
+#| code-fold: show
+data_treated_cc <-
+  data_missing |>
+  filter(arm == "treatment") |>
+  drop_na(cure, sex, physical_activity)
+
+nrow(data_treated_cc)
+
+fit_cc <- glm(
+  formula = formula,
+  family = binomial,
+  data = data_treated_cc
+)
+
+fit_cc |> summary()
+```
+
+```{r}
+#| label: fig-cc
+#| fig-cap: "Weight vs cure in the complete-case data for treated participants."
+#| fig-height: 3
+#| fig-width: 6
+g_cc <-
+  ggplot(data_treated_cc, aes(x = wt, y = cure)) +
+  # geom_point(alpha = 0.5) +
+  geom_jitter(width = 0, height = 0.05, alpha = 0.3) +
+  geom_smooth(
+    method = "glm",
+    method.args = list(family = "binomial")
+  ) +
+  xlim(range(data_treated_complete$wt) + c(-1, 1)) +
+  scale_y_continuous(breaks = c(0, 1), minor_breaks = NULL)
+
+g_cc
+```
+
+
+## Imputation to the mean (or the mode)
+
+
+```{r}
+
+stat_mode <- function(x) {
+  tab <- table(x)
+  names(tab)[tab == max(tab)]
+}
+
+data_missing_mean_imp <-
+  data_missing |>
+  mutate(
+    wt_imp = is.na(wt),
+    age = ifelse(is.na(age), mean(age, na.rm = TRUE), age),
+    ht = ifelse(is.na(ht), mean(ht, na.rm = TRUE), ht),
+    wt = ifelse(is.na(wt), mean(wt, na.rm = TRUE), wt),
+    sex = ifelse(is.na(sex), sex |> stat_mode(), sex |> as.character()) |>
+      factor(levels = data_missing$sex |> levels()),
+    physical_activity = ifelse(
+      is.na(physical_activity),
+      physical_activity |> stat_mode(),
+      physical_activity |> as.character()
+    ) |>
+      factor(levels = data_missing$physical_activity |> levels())
+  )
+# data_missing_mean_imp
+```
+
+
+```{r}
+#| label: fit-mean-imp
+#| code-fold: show
+data_treated_mean_imp <-
+  data_missing_mean_imp |>
+  filter(arm == "treatment")
+
+nrow(data_treated_mean_imp)
+
+fit_mean_imp <- glm(
+  formula = formula,
+  family = binomial,
+  data = data_treated_mean_imp
+)
+
+fit_mean_imp |> summary()
+```
+
+```{r}
+#| label: fig-mean-imp
+#| fig-cap: "Weight vs cure in the mean-imputed data for treated participants."
+#| fig-height: 3
+#| fig-width: 6
+
+g_mean_imp <-
+  ggplot(data_treated_mean_imp, aes(x = wt, y = cure)) +
+  # geom_point(alpha = 0.3) +
+  geom_jitter(aes(col = wt_imp), width = 0, height = 0.05, alpha = 0.3) +
+  geom_smooth(
+    method = "glm",
+    method.args = list(family = "binomial")
+  ) +
+  xlim(range(data_treated_complete$wt) + c(-1, 1)) +
+  scale_y_continuous(breaks = c(0, 1), minor_breaks = NULL) +
+  scale_color_manual(values = c("black", "red3")) +
+  guides(col = "none")
+g_mean_imp
+```
+
+
+This imputation method prevents loss of data (loss of power), but is problematic because 
+
+- it ignores the potential relationships between the variables when imputing missing values, which can lead to biased estimates (or irrealistic values for some individuals);
+- it ignores the uncertainty about the missing values, **treating the imputed values as if they were observed**, which can lead to underestimated standard errors.
+
+
+## Multiple imputation with `mice`
+
+
+### Introduction to Multiple Imputation by Chained Equations
+
+
+#### Key concepts
+
+- **Multiple imputation**: instead of filling in a *single value* for each missing entry, we create *multiple completed datasets* to reflect the uncertainty about the missing values.
+- **Chained equations**: each variable with missing values is imputed using a model that predicts it from the other variables, iteratively updating the imputations.
+- **Rubin's rules**: a method to combine estimates from multiple imputed datasets, accounting for both within-imputation and between-imputation variability.
+
+
+![](images/illu%20mice.png)
+
+
+#### The three steps of multiple imputation as implemented in `mice`
+
+
+1. **Impute**: create $m$ completed datasets. 
+
+In each dataset, every missing value is replaced by a *draw* from a model that predicts that variable from the others. The draws differ between datasets, which reflects our uncertainty about the missing values.
+
+This can be done using the `mice::mice` function, which iteratively imputes the missing values according to the specified models for each variable.
+
+::: {.callout-note collapse="true"}
+## `mice` help
+
+```{r}
+#| echo: false
+rd <- utils:::.getHelpFile(help("mice", package = "mice"))
+tools::Rd2txt(rd, out = "", options = list(underline_titles = FALSE))
+```
+
+:::
+
+2. **Analyse**: fit the analysis model to each completed dataset.
+
+This can be done using the `mice::with` function, which applies the analysis model to each of the imputed datasets.
+
+
+3. **Pool**: combine the $m$ estimates with **Rubin's rules**. The pooled estimate is the average of the $m$ estimates, and its variance adds the average within-imputation variance to the between-imputation variance.
+
+This can be done using the `mice::pool` function, which combines the estimates from the multiple imputed datasets according to Rubin's rules.
+
+### Imputing the full dataset, not only the treated arm
+
+While our model of interest only involves the *treated arm*, imputing the missing values using the *full dataset* allows us to use all available information, which can lead to more accurate and realistic imputations. Once imputation is done, we will subset the data to the treated participants for the analysis.
+
+We also include the outcome variable `cure` in the imputation models as well as the randomization variable `arm` as predictors for the imputation models. While this may seem counterintuitive (circular reasoning), it is actually a recommended practice in multiple imputation, as it can help to preserve the relationships between variables and improve the quality of the imputations.
+
+For more information on the rationale for including the outcome variable in the imputation models, see [White et al., 2011](https://doi.org/10.1002/sim.4067) or [van Buuren, 2018](https://stefvanbuuren.name/fimd/sec-modelform.html).
+
+
+### Setting up the imputation
+
+To access the default settings of `mice`, we can perform a "dry run" with `maxit = 0`, which initializes the imputation process without actually imputing any values.
+
+We are interested in checking the two following options:
+
+- `method`, which specifies which imputation model is chosen for each variable;
+- `predictorMatrix`, which specifies which variables are used as predictors for each imputation model.
+
+
+```{r}
+#| label: dry-run
+ini <- mice(data_missing, maxit = 0)
+```
+
+#### Imputation methods for each variable
+
+```{r}
+#| label: imputation-methods
+ini$method |>
+  as.data.frame() |>
+  rownames_to_column("variable") |>
+  gt()
+```
+
+`mice` picked a method for each variable based on the variable's type:
+
+- `pmm` (predictive mean matching) is typically chosen for numeric variables: each missing value is replaced **by an observed value** from a participant with a similar prediction, so imputed values are always realistic (since they are drawn from the observed data).
+
+- `polyreg` (multinomial regression) for unordered factors with more than two levels (here, it was chosen for the variable `physical_activity`).
+
+Other options include:
+
+- `norm` for linear regression of numeric variables;
+- `logreg` (logistic regression) is typically chosen for factors with two levels;
+- `polr` for ordered factors with more than two levels.
+
+:::{.callout-tip}
+Check the `mice` documentation for a full list of available imputation methods.
+:::
+
+Here, we will change the imputation method for the variable `physical_activity` to `polr`, as it is an ordered factor with more than two levels.
+
+```{r}
+ini$method["physical_activity"] <- "polr"
+```
+
+
+#### Predictor matrix
+
+The **predictor matrix** says which variables are used to impute which. 
+
+A 1 in row `wt` and column `ht` means that `ht` is used to impute `wt`. 
+
+The default predictor matrix is:
+
+```{r}
+#| label: predictor-matrix-default
+pred <- ini$predictorMatrix
+pred
+```
+
+
+The participant identifier `id` has 1 value per row, `mice` recognized it as an identifier, so excluded it from the predictors. 
+
+If we wanted to exclude other variables, we could set the corresponding entries in the predictor matrix to 0 (see sensitivity analysis in section below). 
+
+
+### Running `mice`
+
+Now that we have specified the predictor matrix and checked the imputation methods, we can run the `mice` function to generate the multiple imputed datasets.
+
+```{r}
+m <- 20
+```
+
+We create $m =$ `r m` imputed datasets with 10 iterations each. Setting `seed` makes the imputations reproducible.
+
+```{r}
+#| label: run-mice
+#| code-fold: show
+imp <- mice(
+  data_missing,
+  m = m,
+  maxit = 10,
+  predictorMatrix = pred,
+  method = ini$method,
+  seed = 2026,
+  printFlag = FALSE
+)
+imp
+```
+
+### Checking the imputations
+
+#### Convergence
+
+The trace plots show the mean and standard deviation of the imputed values across iterations, with one line per imputed dataset. The lines should mix well and show no trend.
+
+```{r}
+#| label: fig-trace
+#| fig-cap: "Trace plots of the imputed numeric variables."
+#| fig-height: 6
+plot(imp, c("age", "ht", "wt"))
+```
+
+#### Are the imputed values plausible?
+
+`complete(imp, action = "long", include = TRUE)` stacks the original data (`.imp == 0`) and the 20 completed datasets in one `tibble`, which we can plot with `ggplot2`. We use the missingness indicators of the original data to flag which values were imputed.
+
+```{r}
+#| label: long-data
+imp_long <-
+  complete(imp, action = "long", include = TRUE) |>
+  as_tibble()
+
+was_missing <- is.na(data_missing)
+
+imp_long_numeric <-
+  imp_long |>
+  filter(.imp > 0) |>
+  mutate(
+    age_imputed = rep(was_missing[, "age"], imp$m),
+    ht_imputed = rep(was_missing[, "ht"], imp$m),
+    wt_imputed = rep(was_missing[, "wt"], imp$m)
+  ) |>
+  pivot_longer(c(age, ht, wt), names_to = "variable") |>
+  mutate(
+    imputed = case_match(
+      variable,
+      "age" ~ age_imputed,
+      "ht" ~ ht_imputed,
+      "wt" ~ wt_imputed
+    )
+  ) |>
+  mutate(imputed = if_else(imputed, "imputed", "observed"))
+```
+
+```{r}
+#| label: fig-density
+#| fig-cap: "Distributions of observed (black) and imputed (red) values, one red line per imputed dataset."
+imp_long_numeric |>
+  ggplot(aes(x = value)) +
+  geom_density(
+    data = \(d) filter(d, imputed == "imputed"),
+    aes(group = .imp),
+    colour = "firebrick",
+    alpha = 0.3
+  ) +
+  geom_density(
+    data = \(d) filter(d, imputed == "observed", .imp == 1),
+    colour = "black",
+    linewidth = 1
+  ) +
+  facet_wrap(~variable, scales = "free")
+```
+
+The imputed and observed distributions don't have to be identical. Under MAR, they can differ when missingness is related to other variables. They should, however, be within a plausible range.
+
+#### Relationship between height and weight
+
+```{r}
+#| label: fig-ht-wt
+#| fig-width: 8
+#| fig-height: 6
+#| fig-cap: "Relationship between height and weight by imputation status."
+base_plot <-
+  imp_long |>
+  group_by(id) |>
+  mutate(
+    imputation_status = case_when(
+      any(is.na(ht) & is.na(wt)) ~ "both imputed",
+      any(is.na(ht)) ~ "ht imputed",
+      any(is.na(wt)) ~ "wt imputed",
+      TRUE ~ "both observed"
+    ) |>
+      factor(
+        levels = c("both observed", "ht imputed", "wt imputed", "both imputed")
+      )
+  ) |>
+  ungroup() |>
+  ggplot() +
+  aes(x = ht, y = wt, color = imputation_status, label = id) +
+  # geom_path(aes(group = id)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(
+    "",
+    values = c(
+      "both observed" = "black",
+      "ht imputed" = "dodgerblue",
+      "wt imputed" = "purple",
+      "both imputed" = "red"
+    ),
+    guide = guide_legend(override.aes = list(alpha = 1))
+  )
+
+base_plot |> plotly::ggplotly()
+```
+
+```{r}
+#| eval: false
+#| fig-width: 10
+#| fig-height: 10
+base_plot +
+  facet_wrap(.imp ~ .)
+```
+
+
+
+
+
+```{r}
+#| label: fig-ht-wt-for-wt-imputed
+#| eval: true
+#| fig-width: 8
+#| fig-height: 6
+#| fig-cap: "Relationship between height and weight for participants with imputed weight."
+base_plot <-
+  imp_long |>
+  # bind_rows(
+  #   data_complete |> mutate(.imp = 0, .id = 100)
+  # ) |>
+  group_by(id) |>
+  mutate(
+    imputation_status = case_when(
+      any(is.na(ht) & is.na(wt)) ~ "both imputed",
+      any(is.na(ht)) ~ "ht imputed",
+      any(is.na(wt)) ~ "wt imputed",
+      TRUE ~ "both observed"
+    ) |>
+      factor(
+        levels = c("both observed", "ht imputed", "wt imputed", "both imputed")
+      )
+  ) |>
+  ungroup() |>
+  filter(imputation_status %in% c("wt imputed")) |>
+  ggplot() +
+  aes(x = ht, y = wt, color = physical_activity) + # , size = .id == 100
+  # geom_path(aes(group = id)) +
+  geom_point(alpha = 0.5)
+
+base_plot
+```
+
+```{r}
+#| eval: false
+#| fig-width: 10
+#| fig-height: 10
+base_plot +
+  facet_wrap(.imp ~ .)
+```
+
+
+
+
+
+#### Categorical variables
+
+```{r}
+#| label: fig-pa-imputed
+#| fig-width: 8
+#| fig-height: 6
+#| fig-cap: "Imputed physical activity of participants."
+imp_long |>
+  group_by(id) |>
+  mutate(
+    any_imputed_pa = any(is.na(physical_activity))
+  ) |>
+  ungroup() |>
+  filter(any_imputed_pa, .imp != 0) |>
+  group_by(id) |>
+  mutate(pa_score = as.numeric(physical_activity) |> mean()) |>
+  ungroup() |>
+  mutate(id = id |> fct_reorder(pa_score)) |>
+  arrange(id) |>
+  ggplot() +
+  aes(y = id, fill = physical_activity) +
+  geom_bar() +
+  scale_fill_viridis_d("Imputed physical activity", option = "E") +
+  xlab("Number of imputations")
+```
+
+
+```{r}
+#| label: fig-sex-imputed
+#| fig-width: 8
+#| fig-height: 6
+#| fig-cap: "Imputed sex of participants."
+#| eval: false
+imp_long |>
+  group_by(id) |>
+  mutate(
+    any_imputed_sex = any(is.na(sex))
+  ) |>
+  ungroup() |>
+  filter(any_imputed_sex, .imp != 0) |>
+  group_by(id) |>
+  mutate(sex_score = as.numeric(sex) |> mean()) |>
+  ungroup() |>
+  mutate(id = id |> fct_reorder(sex_score)) |>
+  arrange(id) |>
+  ggplot() +
+  aes(y = id, fill = sex) +
+  geom_bar() +
+  scale_fill_viridis_d("Imputed sex", option = "G") +
+  xlab("Number of imputations")
+```
+
+
+### Analysing and pooling
+
+Now that we have imputed the missing data, we can fit our analysis model to each of the completed datasets and then combine the results using Rubin's rules.
+
+The function `with()` fits the analysis model to each of the 20 completed datasets. We keep only the treated participants with the `subset` argument of `glm()`.
+
+```{r}
+#| label: fit-mi
+#| code-fold: show
+fit_mi <- with(
+  imp,
+  glm(
+    cure ~ wt,
+    family = binomial,
+    subset = arm == "treatment"
+  )
+)
+```
+
+`pool()` combines the 20 fits with Rubin's rules:
+
+```{r}
+#| label: pool
+#| code-fold: show
+pooled <- pool(fit_mi)
+
+summary(pooled, conf.int = TRUE, exponentiate = FALSE)
+```
+
+We can compare the individual fits with the pooled estimates:
+
+
+```{r}
+#| label: comparison-fits-with-pooled
+#| fig-width: 6
+#| fig-height: 4
+#| fig-cap: "Comparison of the individual estimates (one per simulated dataset) with the pooled estimate"
+
+tmp <-
+  map(
+    fit_mi$analyses,
+    .f = function(.x) {
+      .x |>
+        tidy(conf.int = TRUE, exponentiate = TRUE) |>
+        filter(term == "wt")
+    }
+  ) |>
+  bind_rows(.id = "sim") |>
+  mutate(cat = "sim") |>
+  bind_rows(
+    pooled |>
+      tidy(conf.int = TRUE, exponentiate = TRUE) |>
+      filter(term == "wt") |>
+      mutate(sim = "pooled", cat = "pooled")
+  ) |>
+  mutate(cat = cat |> fct_inorder(), sim = sim |> fct_inorder())
+
+tmp |>
+  ggplot() +
+  facet_grid(cat ~ ., scales = "free", space = "free") +
+  aes(
+    x = estimate,
+    xmin = conf.low,
+    xmax = conf.high,
+    y = sim |> fct_rev(),
+    col = cat
+  ) +
+  geom_vline(xintercept = 1, col = "gray") +
+  geom_vline(
+    data = tmp |>
+      filter(cat == "pooled") |>
+      select(-cat) |>
+      expand_grid(cat = c("sim", "pooled")),
+    aes(xintercept = estimate),
+    col = "black",
+    linetype = 2,
+    alpha = 0.5
+  ) +
+  geom_linerange() +
+  geom_point(size = 1.5) +
+  guides(col = "none") +
+  scale_color_manual(values = c("dodgerblue2", "black")) +
+  ylab("") +
+  xlab("Estimate (odds ratio) with 95% CI") +
+  theme(
+    strip.text.y = element_text(angle = 0)
+  )
+```
+
+
+### Sensitivity analyses
+
+#### S1: Excluding the outcome and randomization variables from the imputation models {#sec:sensitivity-analysis}
+
+```{r}
+#| label: predictor-matrix-modified
+pred_mod <- pred
+pred_mod[, "arm"] <- 0
+pred_mod[, "cure"] <- 0
+pred_mod
+```
+
+```{r}
+#| label: s1-imp-and-fit
+imp_s1 <- mice(
+  data_missing,
+  m = m,
+  maxit = 10,
+  predictorMatrix = pred_mod,
+  method = ini$method,
+  seed = 2026,
+  printFlag = FALSE
+)
+imp_s1
+
+fit_mi_s1 <- with(
+  imp_s1,
+  glm(
+    cure ~ wt,
+    family = binomial,
+    subset = arm == "treatment"
+  )
+)
+
+pooled_s1 <- pool(fit_mi_s1)
+
+summary(pooled_s1, conf.int = TRUE, exponentiate = FALSE)
+```
+
+
+
+
+#### S2: Using different imputation models
+
+```{r}
+#| label: s2-edit-imp-model
+
+method_mod <- ini$method
+method_mod[c("age", "ht", "wt")] <- "norm"
+
+method_mod |>
+  as.data.frame() |>
+  rownames_to_column("variable") |>
+  gt()
+```
+
+
+```{r}
+#| label: s2-imp-and-fit
+
+imp_s2 <- mice(
+  data_missing,
+  m = m,
+  maxit = 10,
+  predictorMatrix = pred,
+  method = method_mod,
+  seed = 2026,
+  printFlag = FALSE
+)
+imp_s2
+
+fit_mi_s2 <- with(
+  imp_s2,
+  glm(
+    cure ~ wt,
+    family = binomial,
+    subset = arm == "treatment"
+  )
+)
+
+pooled_s2 <- pool(fit_mi_s2)
+
+summary(pooled_s2, conf.int = TRUE, exponentiate = FALSE)
+```
+
+
+#### S3: Including BMI as auxiliary variable
+
+```{r}
+#| label: adding-bmi
+data_missing_augmented <-
+  data_missing |>
+  mutate(bmi = wt / (ht / 100)^2)
+```
+
+```{r}
+#| label: s3-imp-and-fit
+imp_s3 <- mice(
+  data_missing_augmented,
+  m = m,
+  maxit = 10,
+  seed = 2026,
+  printFlag = FALSE
+)
+imp_s3
+
+fit_mi_s3 <- with(
+  imp_s3,
+  glm(
+    cure ~ wt,
+    family = binomial,
+    subset = arm == "treatment"
+  )
+)
+
+pooled_s3 <- pool(fit_mi_s3)
+
+summary(pooled_s3, conf.int = TRUE, exponentiate = FALSE)
+```
+
+
+## Comparing the different approaches
+
+```{r}
+#| label: comparison
+comparison <-
+  bind_rows(
+    "Complete data (reference)" = tidy(
+      fit_complete,
+      conf.int = TRUE,
+      exponentiate = TRUE
+    ),
+    "Complete cases" = tidy(fit_cc, conf.int = TRUE, exponentiate = TRUE),
+    "Imputation to the mean" = tidy(
+      fit_mean_imp,
+      conf.int = TRUE,
+      exponentiate = TRUE
+    ),
+    "Multiple imputation" = summary(
+      pooled,
+      conf.int = TRUE,
+      exponentiate = TRUE
+    ) |>
+      as_tibble() |>
+      select(-c(`2.5 %`, `97.5 %`)),
+    "Multiple imputation (S1)" = summary(
+      pooled_s1,
+      conf.int = TRUE,
+      exponentiate = TRUE
+    ) |>
+      as_tibble() |>
+      select(-c(`2.5 %`, `97.5 %`)),
+    "Multiple imputation (S2)" = summary(
+      pooled_s2,
+      conf.int = TRUE,
+      exponentiate = TRUE
+    ) |>
+      as_tibble() |>
+      select(-c(`2.5 %`, `97.5 %`)),
+    "Multiple imputation (S3)" = summary(
+      pooled_s3,
+      conf.int = TRUE,
+      exponentiate = TRUE
+    ) |>
+      as_tibble() |>
+      select(-c(`2.5 %`, `97.5 %`)),
+    .id = "approach"
+  ) |>
+  filter(term == "wt") |>
+  mutate(
+    approach = fct_inorder(approach),
+    ci_width = conf.high - conf.low
+  ) |>
+  select(
+    approach,
+    odds_ratio = estimate,
+    conf.low,
+    conf.high,
+    ci_width,
+    p.value
+  )
+
+comparison |>
+  gt(caption = "Comparison of the different approaches") |>
+  fmt_number(
+    columns = vars(odds_ratio, conf.low, conf.high, ci_width, p.value),
+    n_sigfig = 2
+  ) |>
+  fmt_number(
+    columns = c(conf.high),
+    n_sigfig = 3
+  ) |>
+  cols_label(
+    approach = "Approach",
+    odds_ratio = "Odds Ratio",
+    conf.low = "CI Lower",
+    conf.high = "CI Upper",
+    ci_width = "CI Width",
+    p.value = "P-value"
+  )
+```
+
+```{r}
+#| label: fig-comparison
+#| fig-cap: "Odds ratio of cure for a one-unit increase in weight in the treated arm, with 95% confidence intervals."
+#| fig-width: 7
+#| fig-height: 3
+comparison |>
+  ggplot(aes(x = odds_ratio, y = fct_rev(approach))) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  labs(x = "Odds ratio (per unit increase in weight)", y = NULL)
+```
+
+
+```{r}
+#| label: fig-fits-comparison
+#| fig-width: 5
+#| fig-height: 8
+#| fig-cap: "Comparison of graphical model fits for different approaches."
+g_complete_data +
+  ggtitle("Complete data") +
+  g_cc +
+  ggtitle("Complete cases") +
+  g_mean_imp +
+  ggtitle("Imputation to the mean") +
+  plot_layout(ncol = 1)
+```
+
+
+
+
+
+::: {.callout collapse="true"}
+## Session Info
+```{r}
+#| label: session-info
+sessionInfo()
+```
+:::
