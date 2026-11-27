@@ -1,6 +1,6 @@
 ---
 title: "Simulating a clinical trial dataset with missing values"
-author: Laura Symul & Claude AI
+author: Laura Symul, Aurélie Bertrand, & Claude AI
 date: today
 lang: en
 language:
